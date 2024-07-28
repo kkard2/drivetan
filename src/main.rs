@@ -1,4 +1,5 @@
 use clap::Parser;
+use regex::bytes::RegexSet;
 use std::path::PathBuf;
 
 /// Generates a meta directory structure to remember files on unplugged drives.
@@ -36,26 +37,33 @@ fn main() -> anyhow::Result<()> {
 
     let walker = walkdir::WalkDir::new(&args.source).into_iter();
 
+    let regex = match &args.skip_file {
+        Some(skip_file) => RegexSet::new(std::fs::read_to_string(skip_file)?.lines())?,
+        None => RegexSet::empty(),
+    };
+
     let mut success_entries: u128 = 0;
     let mut error_entries: u128 = 0;
 
     for entry in walker {
         match entry {
             Err(err) => {
-                eprintln!("{}, skipping...", err);
+                eprintln!("error: {}, skipping...", err);
                 error_entries += 1;
             }
             Ok(entry) => {
-                match handle_direntry(&args, &entry) {
-                    Err(err) => {
-                        eprintln!("{}, skipping...", err);
-                        error_entries += 1;
-                    }
-                    Ok(()) => {
-                        println!("{}", entry.path().to_str().unwrap_or(NON_UNICODE_PATH));
-                        success_entries += 1;
-                    }
-                };
+                if !regex.is_match(entry.path().as_os_str().as_encoded_bytes()) {
+                    match handle_direntry(&args, &entry) {
+                        Err(err) => {
+                            eprintln!("error: {}", err);
+                            error_entries += 1;
+                        }
+                        Ok(()) => {
+                            println!("{}", entry.path().to_str().unwrap_or(NON_UNICODE_PATH));
+                            success_entries += 1;
+                        }
+                    };
+                }
             }
         }
     }
@@ -138,10 +146,6 @@ human_size: {}
 }
 
 fn check_args(args: &Args) -> anyhow::Result<()> {
-    if args.skip_file.is_some() {
-        todo!();
-    }
-
     if !args.source.exists() {
         anyhow::bail!(
             "source path {} does not exist or cannot be accessed",
