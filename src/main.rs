@@ -3,27 +3,28 @@ use regex::bytes::RegexSet;
 use std::path::PathBuf;
 
 /// Generates a meta directory structure to remember files on unplugged drives.
-///
 /// Standard output lists properly processed files separated by newlines.
 #[derive(Parser, Debug)]
+#[command(version)]
 struct Args {
     source: PathBuf,
     destination: PathBuf,
 
-    /// Max size in bytes to copy file unchanged
+    /// Max size in bytes to copy file unchanged.
     #[arg(short, long, value_name = "SIZE_IN_BYTES", default_value = "0")]
     max_size: u64,
 
-    /// Extension for meta files
+    /// Extension for meta files.
     #[arg(short, long, value_name = "EXTENSION", default_value = ".drivetan.txt")]
     extension: String,
 
-    /// Magic at the start of a meta file
+    /// Magic at the start of a meta file.
     #[arg(long, value_name = "MAGIC", default_value = "DRIVETAN")]
     magic: String,
 
-    /// TODO: Skip files/directories matching regexes in the provided file,
-    /// separated by newlines (e.g. ".*\.git.*")
+    /// Skip files/directories matching regexes in the provided file,
+    /// separated by newlines (e.g. "\.git").
+    /// Empty folders do not have trailing slashes.
     #[arg(long, value_name = "PATH")]
     skip_file: Option<PathBuf>,
 }
@@ -38,24 +39,39 @@ fn main() -> anyhow::Result<()> {
     let walker = walkdir::WalkDir::new(&args.source).into_iter();
 
     let regex = match &args.skip_file {
-        Some(skip_file) => RegexSet::new(std::fs::read_to_string(skip_file)?.lines())?,
+        Some(skip_file) => RegexSet::new(
+            match std::fs::read_to_string(skip_file) {
+                Ok(it) => it,
+                Err(err) => anyhow::bail!(
+                    "could not read file {}: {}",
+                    skip_file.to_str().unwrap_or(NON_UNICODE_PATH),
+                    err
+                ),
+            }
+            .lines(),
+        )?,
         None => RegexSet::empty(),
     };
 
     let mut success_entries: u128 = 0;
     let mut error_entries: u128 = 0;
+    let mut skipped_entries: u128 = 0;
 
     for entry in walker {
         match entry {
             Err(err) => {
-                eprintln!("error: {}, skipping...", err);
+                eprintln!("could not read directory entry: {}", err);
                 error_entries += 1;
             }
             Ok(entry) => {
                 if !regex.is_match(entry.path().as_os_str().as_encoded_bytes()) {
                     match handle_direntry(&args, &entry) {
                         Err(err) => {
-                            eprintln!("error: {}", err);
+                            eprintln!(
+                                "handling directory entry {} failed: {}",
+                                entry.path().to_str().unwrap_or(NON_UNICODE_PATH),
+                                err
+                            );
                             error_entries += 1;
                         }
                         Ok(()) => {
@@ -63,6 +79,8 @@ fn main() -> anyhow::Result<()> {
                             success_entries += 1;
                         }
                     };
+                } else {
+                    skipped_entries += 1;
                 }
             }
         }
@@ -76,8 +94,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     eprintln!(
-        "success count: {}, error count: {}",
-        success_entries, error_entries
+        "success count: {}, error count: {}, skipped count: {}",
+        success_entries, error_entries, skipped_entries
     );
     Ok(())
 }
@@ -124,13 +142,13 @@ fn handle_direntry(args: &Args, direntry: &walkdir::DirEntry) -> anyhow::Result<
 fn construct_meta_content(args: &Args, meta: &std::fs::Metadata) -> Vec<u8> {
     let len = meta.len();
     let human_size = if len < 1024 {
-        format!("{}B", len)
+        format!("{} B", len)
     } else if len < 1024 * 1024 {
-        format!("{:.2}KiB", len as f64 / 1024.0)
+        format!("{:.2} KiB", len as f64 / 1024.0)
     } else if len < 1024 * 1024 * 1024 {
-        format!("{}MiB", len as f64 / (1024.0 * 1024.0))
+        format!("{:.2} MiB", len as f64 / (1024.0 * 1024.0))
     } else {
-        format!("{}GiB", len as f64 / (1024.0 * 1024.0 * 1024.0))
+        format!("{:.2} GiB", len as f64 / (1024.0 * 1024.0 * 1024.0))
     };
 
     let result = format!(
@@ -154,8 +172,17 @@ fn check_args(args: &Args) -> anyhow::Result<()> {
     }
 
     if !args.destination.exists() {
-        std::fs::create_dir(&args.destination)?;
-    } else if std::fs::read_dir(&args.destination)?.next().is_some() {
+        match std::fs::create_dir(&args.destination) {
+            Ok(it) => it,
+            Err(err) => anyhow::bail!("creating destination directory failed: {}", err),
+        };
+    } else if match std::fs::read_dir(&args.destination) {
+        Ok(it) => it,
+        Err(err) => anyhow::bail!("reading destination directory failed: {}", err),
+    }
+    .next()
+    .is_some()
+    {
         // TODO: some kind of diffing should probably be supported
         anyhow::bail!(
             "destination path {} is not empty",
