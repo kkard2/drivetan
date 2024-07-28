@@ -28,7 +28,7 @@ Options:
 cargo build
 ```
 
-# Installation
+# Installing
 ```
 cargo install --path .
 ```
